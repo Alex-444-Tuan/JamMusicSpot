@@ -1,0 +1,43 @@
+services:
+  redis:
+    # Which image/tag? Upstash is Redis-protocol compatible — a
+    # recent stable "redis" image (major version 7) is the closest
+    # local match. Pin a tag, don't use `latest`.
+    image: redis:8.10-alpine
+    ports:
+      # host:container — Redis's default port is 6379
+      - "6379:6379"
+    volumes:
+      # Name a volume so queued/vote state survives `docker compose
+      # down` (use `docker compose down -v` when you want to wipe it).
+      - redis-data:/data
+    healthcheck:
+      # redis-cli has a built-in ping command that replies PONG once
+      # the server is accepting connections. What's the `test:` array?
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  mongo:
+    # Which image/tag? Check what major version Atlas currently runs
+    # and match it locally so query behavior doesn't drift.
+    image: mongo:7.0
+    ports:
+      # Mongo's default port is 27017
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # mongosh can run an admin-db ping command non-interactively.
+      # What's the `test:` array?
+      test: ["CMD","mongosh", "--eval", "db.adminCommand('ping').ok", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  redis-data:
+  mongo-data:
