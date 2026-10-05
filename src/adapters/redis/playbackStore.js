@@ -9,8 +9,9 @@ import { roomStoreKeys, VOTERS_SUFFIX } from "./roomStore.js";
 //   STALE — currentTrackId ≠ expected; nothing changed
 //   NOOP  — IDLE with an empty queue; nothing changed
 //   OK    — trackId is the new current track, or false → went IDLE
-// The new state is concatenated rather than cjson.encode'd so ms
-// timestamps keep full precision (cjson prints 14 significant digits).
+// The new state is concatenated rather than cjson.encode'd. cjson prints 14
+// significant digits, which a 13-digit ms epoch would survive, so this is a
+// defensive choice (no reliance on cjson's number formatting), not a bug fix.
 const SKIP_LUA = `
 -- KEYS: 1 queue zset, 2 playback, 3 playback version, 4 room (queue) version
 -- ARGV: 1 expected currentTrackId ('\\0' = null), 2 now (ms), 3 track key prefix, 4 voters suffix
