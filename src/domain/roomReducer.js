@@ -10,7 +10,7 @@
 //   nowPlaying: null,  // or a trackId
 //   version: 0,        // bumped by the store layer, not the reducer itself
 // }
-import { ADD_TRACK, UPVOTE } from './commands.js'
+import { ADD_TRACK, UPVOTE, REMOVE_TRACK } from './commands.js'
 
 export default function roomReducer(state, command){
     switch(command.type){
@@ -45,6 +45,9 @@ export default function roomReducer(state, command){
                     ]
                 }
             })
+        }
+        case REMOVE_TRACK: {
+            return state.filter(track => track.trackId !== command.payload.trackId)
         }
         default:
             return state
