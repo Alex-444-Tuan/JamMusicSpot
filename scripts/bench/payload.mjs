@@ -45,7 +45,7 @@ async function run({ tracks, votes, windowMs, burstMs }) {
         catalog, randomId: cryptoRandomId,
     });
     const { jamId } = await service.createJam();
-    const host = { jamId, userId: 'host', name: 'Host', isHost: true };
+    const host = { jamId, userId: 'host', name: 'Host' }; // ADD_TRACK only: no host token needed
     for (const t of catalog.slice(0, tracks)) await service.handleCommand(host, { type: 'ADD_TRACK', payload: { trackId: t.trackId } });
     rawDiffs.length = 0; snapshots.length = 0; coalescedOut.length = 0; // measure the burst only
     await sleep(windowMs + 20);
@@ -57,7 +57,7 @@ async function run({ tracks, votes, windowMs, burstMs }) {
     for (let i = 0; i < votes; i++) {
         jobs.push((async () => {
             await sleep((i / votes) * burstMs);
-            await service.handleCommand({ jamId, userId: `u${i}`, name: `U${i}`, isHost: false },
+            await service.handleCommand({ jamId, userId: `u${i}`, name: `U${i}` },
                 { type: 'UPVOTE', payload: { trackId: ids[i % ids.length] } });
         })());
     }

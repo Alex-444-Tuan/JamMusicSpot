@@ -13,6 +13,15 @@
 // written last and best-effort: logWriter.enqueue returns immediately and
 // retries in the background, so Mongo can never delay an ack or a diff.
 //
+// Host: whoever holds the room's current host token (JamStorePort.getHost).
+// Host-only commands are authorized by that secret, checked inside the lock
+// on every command, never by userId (userIds are public in vote lists). When
+// the host disconnects, reassessHost waits hostGraceMs (so a refresh does not
+// hand host away), then promotes the earliest-joined member still connected
+// and rotates the token, so the old one stops working. The new token goes
+// privately to the new host ('jam:promoted'); the room hears 'jam:host'.
+// Nobody left: the room is vacant and the next person to join becomes host.
+//
 // All mutations for a room run one at a time: first through a per-room
 // promise chain (cheap, in-process — cuts lock contention), then under a
 // cross-instance Redis lock (roomLock). That is what makes playback's
@@ -57,13 +66,16 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
  *   clock: import('../ports/clock.js').ClockPort,
  *   catalog: Array<{trackId: string}>,
  *   randomId: (length: number, alphabet: string) => string,
+ *   presence?: import('../ports/presence.js').PresencePort,
+ *   hostGraceMs?: number,
  * }} deps
  */
-export function createJamService({ jamStore, roomStore, playbackStore, roomLock, logWriter, broadcaster, clock, catalog, randomId }){
+export function createJamService({ jamStore, roomStore, playbackStore, roomLock, logWriter, broadcaster, clock, catalog, randomId, presence = null, hostGraceMs = 10_000 }){
     const catalogIds = new Set(catalog.map((t) => t.trackId));
 
     // ---- per-room serialization: local chain, then the cross-instance lock ----
     const chains = new Map();
+    const hostTimers = new Map(); // jamId -> pending reassessHost timer
     let closing = false;
     function runExclusive(roomId, fn){
         // Once shutdown starts, refuse new work so close() can drain: the
@@ -78,6 +90,68 @@ export function createJamService({ jamStore, roomStore, playbackStore, roomLock,
             if(chains.get(roomId) === tail) chains.delete(roomId);
         });
         return result;
+    }
+
+    // ---- host succession ----
+    function scheduleReassess(jamId, delayMs){
+        if(closing || !presence) return;
+        clearTimeout(hostTimers.get(jamId));
+        const timer = setTimeout(() => {
+            hostTimers.delete(jamId);
+            reassessHost(jamId).catch((err) => {
+                if(closing) return;
+                console.warn('[jamService] host re-check failed; retrying', { jamId, code: err.code ?? err.message });
+                scheduleReassess(jamId, 1000);
+            });
+        }, Math.max(0, delayMs) + 10);
+        timer.unref?.();
+        hostTimers.set(jamId, timer);
+    }
+
+    /**
+     * Decide whether host must change hands. Safe to call any time and from
+     * any instance (runs under the room lock; extra calls are no-ops). The
+     * gateway calls it after every join and disconnect.
+     *   host connected                 -> nothing (clears a pending absence)
+     *   host missing, first noticed    -> start the grace period
+     *   host missing for >= grace      -> earliest-joined connected member
+     *                                     becomes host with a fresh token;
+     *                                     nobody connected -> room is vacant
+     */
+    async function reassessHost(jamId){
+        if(!presence || closing) return;
+        return runExclusive(jamId, async () => {
+            const host = await jamStore.getHost(jamId);
+            if(!host) return; // jam is gone
+            const connected = new Set(await presence.listPresent(jamId));
+            if(host.userId && connected.has(host.userId)){
+                if(host.absentSince != null) await jamStore.setHost(jamId, { ...host, absentSince: null });
+                return;
+            }
+            const t = clock.now();
+            if(host.absentSince == null){
+                await jamStore.setHost(jamId, { ...host, absentSince: t });
+                scheduleReassess(jamId, hostGraceMs);
+                return;
+            }
+            const waited = t - host.absentSince;
+            if(waited < hostGraceMs){
+                scheduleReassess(jamId, hostGraceMs - waited);
+                return;
+            }
+            const order = await jamStore.membersInJoinOrder(jamId);
+            const next = order.find((id) => id !== host.userId && connected.has(id));
+            if(!next){
+                // Vacant: keep absentSince, so whoever joins next is promoted at once.
+                if(host.userId) await jamStore.setHost(jamId, { userId: null, token: host.token, absentSince: host.absentSince });
+                return;
+            }
+            const token = randomId(HOST_TOKEN_LENGTH, HOST_TOKEN_ALPHABET);
+            await jamStore.setHost(jamId, { userId: next, token, absentSince: null });
+            const hostName = await jamStore.getName(jamId, next);
+            presence.toUser(jamId, next, 'jam:promoted', { jamId, hostToken: token });
+            presence.toRoom(jamId, 'jam:host', { hostUserId: next, hostName });
+        });
     }
 
     // ---- reads ----
@@ -245,8 +319,15 @@ export function createJamService({ jamStore, roomStore, playbackStore, roomLock,
             return { jamId };
         },
 
+        /**
+         * Validate a join, record the member, and decide whether they are the
+         * host: only by presenting the room's current host token. Resolves
+         * {isHost, hostToken (only when isHost), userId, name, host: {userId, name}}.
+         * Becoming host by succession happens in reassessHost, which the
+         * gateway runs after every join and disconnect.
+         */
         async joinJam({ jamId, userId, name, hostToken } = {}){
-            const meta = await requireJam(jamId);
+            await requireJam(jamId);
             if(typeof userId !== 'string' || userId.length === 0 || userId.length > MAX_USER_ID){
                 throw new JamError('BAD_REQUEST', `userId must be a string of 1-${MAX_USER_ID} characters`);
             }
@@ -254,8 +335,35 @@ export function createJamService({ jamStore, roomStore, playbackStore, roomLock,
             if(trimmed.length === 0 || trimmed.length > MAX_NAME){
                 throw new JamError('BAD_REQUEST', `name must be 1-${MAX_NAME} characters`);
             }
-            return { isHost: tokensEqual(hostToken, meta.hostToken), userId, name: trimmed };
+            return runExclusive(jamId, async () => {
+                await jamStore.addMember(jamId, userId, trimmed, clock.now());
+                let host = await jamStore.getHost(jamId);
+                if(!host) throw new JamError('JAM_NOT_FOUND', 'No such jam');
+                const isHost = tokensEqual(hostToken, host.token);
+                if(isHost && (host.userId !== userId || host.absentSince != null)){
+                    // the creator claiming the room, or the host back from a refresh
+                    host = { userId, token: host.token, absentSince: null };
+                    await jamStore.setHost(jamId, host);
+                }
+                const hostName = host.userId ? await jamStore.getName(jamId, host.userId) : null;
+                return {
+                    isHost,
+                    ...(isHost ? { hostToken: host.token } : {}),
+                    userId,
+                    name: trimmed,
+                    host: { userId: host.userId, name: hostName },
+                };
+            });
         },
+
+        /** True if `hostToken` is this room's current host token for `userId`
+         *  (used when a promoted client hands its new token to its socket). */
+        async verifyHost(jamId, userId, hostToken){
+            const host = await jamStore.getHost(jamId);
+            return Boolean(host) && host.userId === userId && tokensEqual(hostToken, host.token);
+        },
+
+        reassessHost,
 
         // Runs through the room's chain and lock so a snapshot never observes
         // a half-applied command (e.g. a store already mutated but the room
@@ -282,11 +390,18 @@ export function createJamService({ jamStore, roomStore, playbackStore, roomLock,
          */
         async handleCommand(ctx, raw){
             const parsed = parse(raw);
-            if(HOST_ONLY.has(parsed.type) && !ctx.isHost){
-                throw new JamError('NOT_HOST', 'Only the host can control playback');
-            }
             return runExclusive(ctx.jamId, async () => {
                 await requireJam(ctx.jamId); // never recreate keys for a vanished jam
+                if(HOST_ONLY.has(parsed.type)){
+                    // Checked here, against the CURRENT token, so a host who was
+                    // replaced loses control immediately.
+                    const host = await jamStore.getHost(ctx.jamId);
+                    if(!host || !tokensEqual(ctx.hostToken, host.token)){
+                        // A guest pressing play may mean the host is gone: re-check soon.
+                        scheduleReassess(ctx.jamId, 0);
+                        throw new JamError('NOT_HOST', 'Only the host can control playback');
+                    }
+                }
                 const before = await readSnapshot(ctx.jamId);
                 return handlers[parsed.type](ctx, parsed, before);
             });
@@ -298,6 +413,8 @@ export function createJamService({ jamStore, roomStore, playbackStore, roomLock,
         // on the surviving instance) and could skip a bump/broadcast.
         async close(){
             closing = true;
+            for(const t of hostTimers.values()) clearTimeout(t);
+            hostTimers.clear();
             await Promise.all([...chains.values()]);
         },
 

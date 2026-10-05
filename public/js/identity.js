@@ -7,7 +7,8 @@
 // invite link opened in a second tab came back with the host's userId (its
 // votes counted as duplicates) and the host's token (it joined as host).
 // Only the display name is shared across tabs, as a convenience to prefill.
-// Tradeoff: closing the host tab and reopening the jam later rejoins as a guest.
+// If the host leaves, the server hands host to the earliest-joined member still
+// connected and sends them a new token ('jam:promoted'); the old one stops working.
 
 const USER_KEY = 'jam.user';          // sessionStorage: {userId}
 const HOST_KEY = 'jam.hostTokens';    // sessionStorage: {[jamId]: token}
@@ -90,5 +91,12 @@ export function getHostToken(jamId) {
 export function saveHostToken(jamId, token) {
   const tokens = readJson(session, HOST_KEY, {}) || {};
   tokens[jamId] = token;
+  writeJson(session, HOST_KEY, tokens);
+}
+
+export function clearHostToken(jamId) {
+  const tokens = readJson(session, HOST_KEY, {}) || {};
+  if (!(jamId in tokens)) return;
+  delete tokens[jamId];
   writeJson(session, HOST_KEY, tokens);
 }

@@ -1,7 +1,7 @@
 // app.js — routing + socket lifecycle. Screens: landing → name → room.
 
 import * as api from './api.js';
-import { getUser, setName, getHostToken, saveHostToken } from './identity.js';
+import { getUser, setName, getHostToken, saveHostToken, clearHostToken } from './identity.js';
 import { startClockSync, stopClockSync, syncClock, isLowConfidence, onSyncChange } from './clock.js';
 import { canAnimate } from './motion.js';
 import { state, applySnapshot, applyDiff, setResyncHandler, resetForJam, resetVersion, setJoinInfo, setJoined, setCatalog } from './state.js';
@@ -183,6 +183,11 @@ function handleJamGone() {
   showLanding('Jam not found — it may have ended. Start a new one?');
 }
 
+function setRole(isHost) {
+  setJoinInfo({ isHost });
+  $('#role-badge').textContent = isHost ? 'Host' : 'Guest';
+}
+
 function joinJam(myEpoch) {
   const me = getUser();
   const msg = { jamId: state.jamId, userId: me.userId, name: me.name };
@@ -230,6 +235,10 @@ function joinJam(myEpoch) {
     setConnectionBadge('live');
     resetAutoAdvance();
     setJoined(true);
+    // The token we hold may be stale (host moved on while we were away): only
+    // keep one the server just confirmed.
+    if (ack.isHost && ack.hostToken) saveHostToken(state.jamId, ack.hostToken);
+    else if (!ack.isHost) clearHostToken(state.jamId);
     setJoinInfo({ isHost: ack.isHost, you: ack.you });
     $('#role-badge').textContent = ack.isHost ? 'Host' : 'Guest';
     const snap = ack.snapshot || {};
@@ -304,6 +313,30 @@ function enterRoom() {
   socket.io.on('reconnect_attempt', () => setConnectionBadge('connecting'));
   socket.on('room:diff', applyDiff); // {fromVersion, toVersion, ops}
   socket.on('jam:error', (e) => toast(friendlyMessage(e), 'error'));
+  // Host succession. The new host alone gets the fresh token; it hands it to
+  // its socket (jam:claimHost) so host-only commands are accepted. If we
+  // reconnect first, the next jam:join sends the saved token instead.
+  socket.on('jam:promoted', (e) => {
+    if (!e || e.jamId !== state.jamId || typeof e.hostToken !== 'string') return;
+    saveHostToken(state.jamId, e.hostToken);
+    const sock = socket;
+    const myEpoch = epoch;
+    sock.timeout(ACK_TIMEOUT_MS).emit('jam:claimHost', { hostToken: e.hostToken }, (err, ack) => {
+      if (myEpoch !== epoch || sock !== socket) return;
+      if (!err && ack && ack.ok && ack.isHost) {
+        setRole(true);
+        toast("The host left, so you're the host now", 'info');
+      }
+    });
+  });
+  socket.on('jam:host', (e) => {
+    if (!e || !state.me || e.hostUserId === state.me.userId) return; // ours arrives as jam:promoted
+    if (state.isHost) {
+      clearHostToken(state.jamId);
+      setRole(false);
+    }
+    toast(`${e.hostName || 'Someone'} is now the host`, 'info');
+  });
 
   if (!visibilityBound) {
     visibilityBound = true;

@@ -19,6 +19,7 @@ import { createRedisRoomLock } from './adapters/redis/roomLock.js';
 import { createMongoCommandLog } from './adapters/mongo/commandLog.js';
 import { createResilientCollection } from './adapters/mongo/resilientCollection.js';
 import { createSocketBroadcaster } from './adapters/socketBroadcaster.js';
+import { createSocketPresence } from './adapters/socketPresence.js';
 import { createCoalescingBroadcaster } from './realtime/broadcastCoalescer.js';
 import { createR2Storage } from './adapters/r2/storage.js';
 import { createSystemClock } from './adapters/systemClock.js';
@@ -45,6 +46,7 @@ const COMMAND_DRAIN_TIMEOUT_MS = 3000;
  *     redisUrl?: string, mongoUrl?: string, mongoDb?: string,
  *     r2?: {endpoint?: string, accessKeyId?: string, secretAccessKey?: string, bucket?: string},
  *     coalesceMs?: number,
+ *     hostGraceMs?: number,
  *   },
  *   overrides?: {commandLog?: object, storage?: object, clock?: object},
  * }} options
@@ -56,6 +58,7 @@ export function createJamServer({ config = {}, overrides = {} } = {}){
         mongoDb = 'jammusicspot',
         r2 = {},
         coalesceMs = 100,
+        hostGraceMs = 10_000, // how long a disconnected host keeps host before succession
     } = config;
 
     // ---- infrastructure clients ----
@@ -103,7 +106,9 @@ export function createJamServer({ config = {}, overrides = {} } = {}){
     const app = express();
     const httpServer = createServer(app);
     const io = new Server(httpServer);
-    io.adapter(createAdapter(pub, sub));
+    // requestsTimeout bounds cross-instance fetchSockets (presence for host
+    // succession), which runs inside the room lock (5 s lease): keep it well under.
+    io.adapter(createAdapter(pub, sub, { requestsTimeout: 2000 }));
 
     // Coalescing window: bursts of votes collapse into one composed broadcast.
     const broadcaster = createCoalescingBroadcaster(createSocketBroadcaster(io), coalesceMs);
@@ -118,6 +123,8 @@ export function createJamServer({ config = {}, overrides = {} } = {}){
         clock,
         catalog,
         randomId: cryptoRandomId,
+        presence: createSocketPresence(io),
+        hostGraceMs,
     });
 
     // ---- HTTP ----

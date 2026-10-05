@@ -19,7 +19,10 @@ const snapshot = { version: 3, queue: [], playback: { status: 'IDLE', currentTra
 
 function fakeService(calls = []) {
   return {
-    joinJam: vi.fn(async ({ userId, name }) => { calls.push('joinJam'); return { isHost: true, userId, name: name.trim() }; }),
+    joinJam: vi.fn(async ({ userId, name }) => {
+      calls.push('joinJam');
+      return { isHost: true, hostToken: 't', userId, name: name.trim(), host: { userId, name: name.trim() } };
+    }),
     getSnapshot: vi.fn(async () => { calls.push('getSnapshot'); return snapshot; }),
     handleCommand: vi.fn(async () => ({ version: 7 })),
   };
@@ -33,10 +36,12 @@ test('jam:join validates, joins the room, then reads the snapshot, then acks', a
 
   await handlers['jam:join']({ jamId: 'AB12CD', userId: 'u1', name: ' Tuan ', hostToken: 't' }, ack);
 
-  expect(calls).toStrictEqual(['joinJam', 'join:AB12CD', 'getSnapshot']);
+  expect(calls).toStrictEqual(['joinJam', 'join:AB12CD,AB12CD:user:u1', 'getSnapshot']);
   expect(service.joinJam).toHaveBeenCalledWith({ jamId: 'AB12CD', userId: 'u1', name: ' Tuan ', hostToken: 't' });
-  expect(ack).toHaveBeenCalledWith({ ok: true, isHost: true, you: { userId: 'u1', name: 'Tuan' }, snapshot });
-  expect(socket.data).toStrictEqual({ jamId: 'AB12CD', userId: 'u1', name: 'Tuan', isHost: true });
+  expect(ack).toHaveBeenCalledWith({
+    ok: true, isHost: true, hostToken: 't', host: { userId: 'u1', name: 'Tuan' }, you: { userId: 'u1', name: 'Tuan' }, snapshot,
+  });
+  expect(socket.data).toStrictEqual({ jamId: 'AB12CD', userId: 'u1', name: 'Tuan', hostToken: 't' });
 });
 
 test('jam:join failure acks the JamError code and does not join the room', async () => {
@@ -59,7 +64,7 @@ test('re-joining a different jam on the same socket leaves the old room', async 
   await handlers['jam:join']({ jamId: 'AAAAAA', userId: 'u', name: 'n' }, vi.fn());
   await handlers['jam:join']({ jamId: 'BBBBBB', userId: 'u', name: 'n' }, vi.fn());
 
-  expect(calls).toStrictEqual(['join:AAAAAA', 'leave:AAAAAA', 'join:BBBBBB']);
+  expect(calls).toStrictEqual(['join:AAAAAA,AAAAAA:user:u', 'leave:AAAAAA', 'leave:AAAAAA:user:u', 'join:BBBBBB,BBBBBB:user:u']);
   expect(socket.data.jamId).toBe('BBBBBB');
 });
 
@@ -85,7 +90,7 @@ test('room:command passes the server-side ctx (not client fields) and acks the v
 
   await handlers['room:command'](raw, ack);
 
-  expect(service.handleCommand).toHaveBeenCalledWith({ jamId: 'AB12CD', userId: 'u1', name: 'Tuan', isHost: true }, raw);
+  expect(service.handleCommand).toHaveBeenCalledWith({ jamId: 'AB12CD', userId: 'u1', name: 'Tuan', hostToken: 't' }, raw);
   expect(ack).toHaveBeenCalledWith({ ok: true, version: 7 });
 });
 
@@ -207,4 +212,42 @@ test('jam:resync without an ack emits jam:error NO_ACK', async () => {
 
   expect(socket.emit).toHaveBeenCalledWith('jam:error', expect.objectContaining({ code: 'NO_ACK' }));
   expect(service.getSnapshot).not.toHaveBeenCalled();
+});
+
+test('a guest join stores no host token; the gateway re-checks the host after joins and disconnects', async () => {
+  const { socket, handlers } = fakeSocket();
+  const service = fakeService();
+  service.joinJam.mockResolvedValueOnce({ isHost: false, userId: 'g', name: 'G', host: { userId: 'h', name: 'H' } });
+  service.reassessHost = vi.fn(async () => {});
+  bindJamHandlers(socket, service);
+  const ack = vi.fn();
+
+  await handlers['jam:join']({ jamId: 'AB12CD', userId: 'g', name: 'G', hostToken: 'guessed' }, ack);
+  expect(ack.mock.calls[0][0]).not.toHaveProperty('hostToken');
+  expect(ack.mock.calls[0][0]).toMatchObject({ ok: true, isHost: false, host: { userId: 'h', name: 'H' } });
+  expect(socket.data.hostToken).toBeNull();
+  expect(service.reassessHost).toHaveBeenCalledWith('AB12CD');
+
+  handlers.disconnect();
+  expect(service.reassessHost).toHaveBeenCalledTimes(2);
+});
+
+test('jam:claimHost stores the token on the socket only if the service verifies it', async () => {
+  const { socket, handlers } = fakeSocket();
+  const service = fakeService();
+  service.joinJam.mockResolvedValueOnce({ isHost: false, userId: 'g', name: 'G', host: { userId: null, name: null } });
+  service.verifyHost = vi.fn(async (jamId, userId, token) => token === 'real');
+  bindJamHandlers(socket, service);
+  await handlers['jam:join']({ jamId: 'AB12CD', userId: 'g', name: 'G' }, vi.fn());
+
+  const bad = vi.fn();
+  await handlers['jam:claimHost']({ hostToken: 'forged' }, bad);
+  expect(bad).toHaveBeenCalledWith({ ok: true, isHost: false });
+  expect(socket.data.hostToken).toBeNull();
+
+  const good = vi.fn();
+  await handlers['jam:claimHost']({ hostToken: 'real' }, good);
+  expect(service.verifyHost).toHaveBeenLastCalledWith('AB12CD', 'g', 'real');
+  expect(good).toHaveBeenCalledWith({ ok: true, isHost: true });
+  expect(socket.data.hostToken).toBe('real');
 });

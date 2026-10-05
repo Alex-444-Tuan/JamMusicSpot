@@ -54,7 +54,8 @@ scripts/       uploadTracks.mjs (R2 upload helper), bench/ (the benchmarks above
   `/shared/stateDiff.js`, so client and server cannot disagree about what a
   diff op means.
 - The server never trusts the client: timestamps are server-stamped, `userId`
-  and name come from the join context, playback commands need the host token.
+  and name come from the join context, playback commands need the room's
+  current host token (checked on every command, rotated on host change).
 
 ### How a vote travels
 
@@ -79,7 +80,7 @@ the live deployment. Rerun them before quoting anything.
 node scripts/bench/voteRace.mjs      # needs local Redis
 node scripts/bench/payload.mjs       # needs local Redis
 node scripts/bench/clockSync.mjs     # hits the live deployment (or pass a URL)
-npm test                             # 204 tests, about 4 s, real Redis + Mongo
+npm test                             # 216 tests, about 4 s, real Redis + Mongo
 ```
 
 ## Known limitations
@@ -91,7 +92,9 @@ npm test                             # 204 tests, about 4 s, real Redis + Mongo
 - No authentication: `userId` is client-generated and the host token is a bearer
   string, so votes can be spoofed. There is no rate limiting.
 - Redis and MongoDB have no auth; they are reachable only on Fly's private network.
-- The host is the only playback authority; if the host leaves, playback stalls.
+- Only the host controls playback. If the host disconnects for more than 10 s,
+  host passes to the earliest-joined member still connected (with a fresh host
+  token; the old one stops working). Playback pauses for at most that window.
 - Scripts that derive keys inside Lua (skip) are not Redis Cluster safe.
 - Clock sync has not been measured on real devices.
 

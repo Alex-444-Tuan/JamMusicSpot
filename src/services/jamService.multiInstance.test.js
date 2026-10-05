@@ -57,9 +57,9 @@ test('6 concurrent SKIPs split across two instances consume exactly one track', 
   const a = instance(redisA, clock);
   const b = instance(redisB, clock);
 
-  const { jamId } = await a.createJam();
+  const { jamId, hostToken } = await a.createJam();
   jams.push(jamId);
-  const host = { jamId, userId: 'h', name: 'Host', isHost: true };
+  const host = { jamId, userId: 'h', name: 'Host', hostToken };
   await a.handleCommand(host, { type: 'ADD_TRACK', payload: { trackId: 'song-x' } });
   await a.handleCommand(host, { type: 'SKIP', payload: { expectedTrackId: null } }); // song-x playing
   for (const trackId of ['song-a', 'song-b', 'song-c']) {
@@ -94,9 +94,9 @@ test('without any lock, 6 concurrent SKIPs across two instances still consume ex
   const a = instance(redisA, clock, noLock);
   const b = instance(redisB, clock, noLock);
 
-  const { jamId } = await a.createJam();
+  const { jamId, hostToken } = await a.createJam();
   jams.push(jamId);
-  const host = { jamId, userId: 'h', name: 'Host', isHost: true };
+  const host = { jamId, userId: 'h', name: 'Host', hostToken };
   await a.handleCommand(host, { type: 'ADD_TRACK', payload: { trackId: 'song-x' } });
   await a.handleCommand(host, { type: 'SKIP', payload: { expectedTrackId: null } }); // song-x playing
   for (const trackId of ['song-a', 'song-b', 'song-c']) {

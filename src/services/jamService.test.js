@@ -85,8 +85,9 @@ afterEach(async () => {
 async function newJam() {
   const jam = await service.createJam();
   createdJams.push(jam.jamId);
-  const host = { jamId: jam.jamId, userId: 'host-user', name: 'Host', isHost: true };
-  const guest = { jamId: jam.jamId, userId: 'guest-user', name: 'Guest', isHost: false };
+  // Host-only commands are authorized by the room's host token, as on a real socket.
+  const host = { jamId: jam.jamId, userId: 'host-user', name: 'Host', hostToken: jam.hostToken };
+  const guest = { jamId: jam.jamId, userId: 'guest-user', name: 'Guest' };
   return { ...jam, host, guest };
 }
 
@@ -144,7 +145,7 @@ test('joinJam: right hostToken → host, wrong or missing token → guest; name 
   const { jamId, hostToken } = await newJam();
 
   expect(await service.joinJam({ jamId, userId: 'u1', name: '  Tuan  ', hostToken }))
-    .toStrictEqual({ isHost: true, userId: 'u1', name: 'Tuan' });
+    .toStrictEqual({ isHost: true, hostToken, userId: 'u1', name: 'Tuan', host: { userId: 'u1', name: 'Tuan' } });
   expect((await service.joinJam({ jamId, userId: 'u2', name: 'A', hostToken: 'nope' })).isHost).toBe(false);
   expect((await service.joinJam({ jamId, userId: 'u3', name: 'B' })).isHost).toBe(false);
 });
