@@ -1,24 +1,45 @@
-// identity.js — stable per-browser identity + host tokens, persisted in localStorage.
-// Vote idempotency on the server keys off userId, so it MUST survive refreshes.
+// identity.js — per-tab identity + host tokens.
+//
+// userId and host tokens live in sessionStorage: private to one tab, but they
+// survive a refresh, which vote idempotency needs (the server keys votes off
+// userId, so a reload must not turn one listener into a new voter).
+// They must NOT be in localStorage: every tab of a browser shares it, so an
+// invite link opened in a second tab came back with the host's userId (its
+// votes counted as duplicates) and the host's token (it joined as host).
+// Only the display name is shared across tabs, as a convenience to prefill.
+// Tradeoff: closing the host tab and reopening the jam later rejoins as a guest.
 
-const USER_KEY = 'jam.user';
-const HOST_KEY = 'jam.hostTokens';
+const USER_KEY = 'jam.user';          // sessionStorage: {userId}
+const HOST_KEY = 'jam.hostTokens';    // sessionStorage: {[jamId]: token}
+const NAME_KEY = 'jam.name';          // localStorage: last used display name
 
-function readJson(key, fallback) {
+function readJson(storage, key, fallback) {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = storage().getItem(key);
     return raw ? JSON.parse(raw) : fallback;
   } catch {
     return fallback;
   }
 }
 
-function writeJson(key, value) {
+function writeJson(storage, key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    storage().setItem(key, JSON.stringify(value));
   } catch {
     // Private mode / quota — identity then lives only for this page load.
   }
+}
+
+const session = () => sessionStorage;
+const local = () => localStorage;
+
+// Before this change the name lived next to the userId in localStorage under
+// jam.user; read it from there once so returning users keep their name.
+function storedName() {
+  const name = readJson(local, NAME_KEY, null);
+  if (typeof name === 'string') return name;
+  const legacy = readJson(local, USER_KEY, null);
+  return legacy && typeof legacy.name === 'string' ? legacy.name : '';
 }
 
 // crypto.randomUUID only exists in secure contexts (https / localhost).
@@ -41,33 +62,33 @@ export function uuidv4() {
 
 let cachedUser = null;
 
-/** Returns {userId, name}; creates and persists a userId on first call. */
+/** Returns {userId, name}; creates and persists a per-tab userId on first call. */
 export function getUser() {
   if (cachedUser) return cachedUser;
-  const stored = readJson(USER_KEY, null);
-  if (stored && typeof stored.userId === 'string' && stored.userId) {
-    cachedUser = { userId: stored.userId, name: typeof stored.name === 'string' ? stored.name : '' };
-  } else {
-    cachedUser = { userId: uuidv4(), name: '' };
-    writeJson(USER_KEY, cachedUser);
+  const stored = readJson(session, USER_KEY, null);
+  let userId = stored && typeof stored.userId === 'string' && stored.userId ? stored.userId : null;
+  if (!userId) {
+    userId = uuidv4();
+    writeJson(session, USER_KEY, { userId });
   }
+  cachedUser = { userId, name: storedName() };
   return cachedUser;
 }
 
 export function setName(name) {
   const user = getUser();
   cachedUser = { ...user, name };
-  writeJson(USER_KEY, cachedUser);
+  writeJson(local, NAME_KEY, name);
   return cachedUser;
 }
 
 export function getHostToken(jamId) {
-  const tokens = readJson(HOST_KEY, {});
+  const tokens = readJson(session, HOST_KEY, {});
   return tokens && typeof tokens[jamId] === 'string' ? tokens[jamId] : undefined;
 }
 
 export function saveHostToken(jamId, token) {
-  const tokens = readJson(HOST_KEY, {}) || {};
+  const tokens = readJson(session, HOST_KEY, {}) || {};
   tokens[jamId] = token;
-  writeJson(HOST_KEY, tokens);
+  writeJson(session, HOST_KEY, tokens);
 }
