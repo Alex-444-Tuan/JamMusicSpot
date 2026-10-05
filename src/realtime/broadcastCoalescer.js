@@ -37,15 +37,27 @@ export function createCoalescingBroadcaster(broadcast, windowMs){
             setTimeout(() => {
                 openRoom.delete(roomId);
                 for(const run of newRoom.runs){
-                    broadcast.publishDiff(roomId, {
-                        fromVersion: run.diff.fromVersion,
-                        toVersion: run.diff.toVersion,
-                        ops: run.hasStates ? chooseCompact(run.before, run.after) : run.diff.ops,
-                    });
+                    // Nobody awaits this timer, so a failed broadcast must be
+                    // contained here: an unhandled rejection would take the
+                    // whole process down on Node 24. A client that misses a
+                    // diff sees a version gap and resyncs from a snapshot.
+                    try {
+                        Promise.resolve(broadcast.publishDiff(roomId, {
+                            fromVersion: run.diff.fromVersion,
+                            toVersion: run.diff.toVersion,
+                            ops: run.hasStates ? chooseCompact(run.before, run.after) : run.diff.ops,
+                        })).catch((err) => reportFailedBroadcast(roomId, err));
+                    } catch (err) {
+                        reportFailedBroadcast(roomId, err);
+                    }
                 }
             }, windowMs);
         }
     }
+}
+
+function reportFailedBroadcast(roomId, err){
+    console.error('[coalescer] broadcast failed; clients will resync on the version gap', { roomId, err });
 }
 
 function newRun(diff, states){

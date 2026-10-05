@@ -231,3 +231,22 @@ test('property: applyOps(firstBefore, coalesced.ops) deep-equals lastAfter (seed
   expect(replaced).toBeGreaterThan(0); // both representations were exercised
   expect(replaced).toBeLessThan(200);
 });
+
+test('a failing broadcast is logged, never thrown or left unhandled, and later runs in the window still flush', async () => {
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const publishDiff = vi.fn()
+    .mockRejectedValueOnce(new Error('socket exploded'))
+    .mockImplementationOnce(() => { throw new Error('sync boom'); })
+    .mockResolvedValue(undefined);
+  const coalescer = createCoalescingBroadcaster({ publishDiff }, 100);
+
+  coalescer.publishDiff('room-1', diff(0, 1));
+  coalescer.publishDiff('room-1', diff(2, 3)); // gap: second run
+  coalescer.publishDiff('room-1', diff(4, 5)); // gap: third run
+  vi.advanceTimersByTime(100);
+  await vi.advanceTimersByTimeAsync(0); // let the rejection settle
+
+  expect(publishDiff).toHaveBeenCalledTimes(3); // the failures did not stop the third run
+  expect(errors).toHaveBeenCalledTimes(2);
+  errors.mockRestore();
+});
