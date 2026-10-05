@@ -1,0 +1,28 @@
+# Secrets / local env
+.env*
+
+# Dependencies are installed inside the image
+node_modules
+
+# VCS, CI, tooling
+.git
+.github
+.claude
+skills-lock.json
+.DS_Store
+**/.DS_Store
+
+# Local-only material
+smokeTest
+scratch*
+AUDIT.md
+CLAUDE.md
+COMMANDS.md
+docker-compose.yml
+
+# Tests (must be **/ — a bare *.test.js only matches the repo root)
+**/*.test.js
+
+jam-audio/
+scripts/
+deploy/

@@ -1,0 +1,34 @@
+# Redis for JamMusicSpot, run as its own tiny Fly app.
+# Why not Fly's managed Upstash Redis: it is pay-per-request and its docs don't
+# promise Pub/Sub or Lua scripts, which this app depends on (every vote is a Lua
+# script; cross-instance fan-out is Pub/Sub). Stock Redis supports both.
+#
+# There is deliberately no [http_service]/[[services]] block, so nothing here is
+# reachable from the internet. The web app reaches it over Fly's private network
+# at jammusicspot-redis.internal:6379 (IPv6 only, hence ?family=6 in REDIS_URL).
+# Data is not persisted: queues and votes are demo state, and a restart just
+# starts rooms empty (clients get JAM_NOT_FOUND and return to the landing page).
+#
+# Deploy:  fly apps create jammusicspot-redis
+#          fly deploy -c deploy/fly.redis.toml
+
+app = 'jammusicspot-redis'
+primary_region = 'iad'
+
+[build]
+  image = 'redis:8.10-alpine'
+
+[experimental]
+  cmd = [
+    'redis-server',
+    '--bind', '* -::*',
+    '--protected-mode', 'no',
+    '--save', '',
+    '--appendonly', 'no',
+    '--maxmemory', '150mb',
+    '--maxmemory-policy', 'noeviction',
+  ]
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'

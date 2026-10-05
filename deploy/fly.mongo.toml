@@ -1,0 +1,29 @@
+# MongoDB for JamMusicSpot's command log, run as its own private Fly app (same
+# pattern as deploy/fly.redis.toml). The log is a best-effort audit trail, but
+# unlike Redis it should survive restarts, so it gets a 1 GB Fly volume.
+#
+# No public service block: reachable only from this Fly organization at
+# jammusicspot-mongo.internal:27017 (IPv6 only, hence ?family=6 in MONGO_URL).
+# No authentication — the private network is the boundary. If this ever needs
+# to be reachable from elsewhere, turn on --auth first.
+#
+# Deploy:  fly apps create jammusicspot-mongo
+#          fly volumes create mongo_data --size 1 --region iad -a jammusicspot-mongo
+#          fly deploy -c deploy/fly.mongo.toml --ha=false
+
+app = 'jammusicspot-mongo'
+primary_region = 'iad'
+
+[build]
+  image = 'mongo:7.0'
+
+[experimental]
+  cmd = ['mongod', '--bind_ip_all', '--ipv6', '--wiredTigerCacheSizeGB', '0.25']
+
+[[mounts]]
+  source = 'mongo_data'
+  destination = '/data/db'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
